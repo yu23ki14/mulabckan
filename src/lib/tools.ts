@@ -88,14 +88,24 @@ export const TOOLS = [
   {
     name: "read_pdf",
     description:
-      "PDFリソースをダウンロードしてテキストを抽出する。全ページの本文を結合して返す。PDF内に画像やスキャン情報しかない場合は抽出テキストが空になる可能性がある。",
+      "PDFリソースを読み取る。まずテキスト抽出を試み、抽出結果が文字化けしている場合（埋め込みフォントでToUnicodeマップがないPDF）は自動的にページ画像を vision モデルに渡す。force_images=true にすれば常に画像として読ませることもできる。",
     input_schema: {
       type: "object",
       properties: {
         resource_id: { type: "string", description: "PDFリソースのID" },
         max_chars: {
           type: "integer",
-          description: "返すテキストの最大文字数 (default 8000, max 20000)",
+          description:
+            "返すテキストの最大文字数 (default 8000, max 20000)。画像フォールバック時は無視",
+        },
+        max_pages: {
+          type: "integer",
+          description: "画像フォールバック時のページ数上限 (default 5, max 10)",
+        },
+        force_images: {
+          type: "boolean",
+          description:
+            "true を指定するとテキスト抽出をスキップしていきなり画像にする",
         },
       },
       required: ["resource_id"],
@@ -333,21 +343,31 @@ export async function executeTool(
         const parser = new PDFParse({ data: buf });
         const result = await parser.getText();
         const fullText = (result.text ?? "").trim();
+        console.log(
+          `[tool:read_pdf] getText done ${JSON.stringify({
+            resource: resource.name,
+            total_pages: result.total,
+            text_len: fullText.length,
+            preview: fullText.slice(0, 60),
+          })}`
+        );
 
         // If text extraction produced garbage (embedded CID fonts without
         // a ToUnicode map), render pages to images instead and hand them
         // to the vision model.
-        if (pdfTextLooksGarbled(fullText)) {
+        const forceImages = input.force_images === true;
+        if (forceImages || pdfTextLooksGarbled(fullText)) {
           console.log(
-            `[tool:read_pdf] garbled text detected, rendering to images ${JSON.stringify(
-              { resource: resource.name, text_len: fullText.length }
-            )}`
+            `[tool:read_pdf] falling back to image render ${JSON.stringify({
+              resource: resource.name,
+              forced: forceImages,
+            })}`
           );
           const maxPages = Math.min(
             Math.max(Number(input.max_pages ?? 5), 1),
             10
           );
-          const shots = (await parser.getScreenshot()) as {
+          let shots: {
             pages: Array<{
               dataUrl: string;
               pageNumber: number;
@@ -355,7 +375,25 @@ export async function executeTool(
             }>;
             total: number;
           };
+          try {
+            shots = (await parser.getScreenshot()) as typeof shots;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(
+              `[tool:read_pdf] getScreenshot failed: ${msg}`
+            );
+            if (e instanceof Error && e.stack) console.error(e.stack);
+            return {
+              error: `PDFのテキスト抽出が失敗し、画像レンダリングも失敗しました: ${msg}。この PDF は埋め込みフォントの問題で読み取れません。`,
+              resource_name: resource.name,
+            };
+          }
           const pages = shots.pages.slice(0, maxPages);
+          console.log(
+            `[tool:read_pdf] rendered ${pages.length} pages ${JSON.stringify({
+              sizes: pages.map((p) => p.data?.byteLength ?? 0),
+            })}`
+          );
           return {
             [PENDING_IMAGES_MARKER]: true,
             images: pages.map((p) => ({

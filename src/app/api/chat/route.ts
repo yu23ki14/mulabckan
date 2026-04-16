@@ -188,7 +188,7 @@ export async function POST(req: NextRequest) {
                   content: [
                     {
                       type: "text",
-                      text: `添付画像 ${result.images.length} 件を確認して回答に活用してください。`,
+                      text: `以下に ${result.images.length} 件の画像を添付します。これらは実在するデータリソース（PDFのページなど）を画像化したものです。画像内に書かれている日本語テキスト・表・図を実際に目で読み取り、その内容を根拠にユーザーの質問に答えてください。「読み取れません」や「画像の内容を確認できません」と返答してはいけません。`,
                     },
                     ...result.images.map((img) => ({
                       type: "image_url" as const,
