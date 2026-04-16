@@ -139,6 +139,13 @@ export async function POST(req: NextRequest) {
             choice.finish_reason === "tool_calls" &&
             assistantMsg.tool_calls?.length
           ) {
+            // OpenAI requires every tool_call_id in the assistant message to
+            // be answered by a contiguous run of role:"tool" messages, with no
+            // other role interleaved. Image attachments from PendingImages
+            // tools have to ride on a follow-up role:"user" message — so we
+            // buffer those and append them only after all tool replies land.
+            const pendingUserMessages: ChatCompletionMessageParam[] = [];
+
             for (const tc of assistantMsg.tool_calls) {
               if (tc.type !== "function") continue;
               const name = tc.function.name;
@@ -183,7 +190,7 @@ export async function POST(req: NextRequest) {
                     attached_images: result.images.length,
                   }),
                 });
-                messages.push({
+                pendingUserMessages.push({
                   role: "user",
                   content: [
                     {
@@ -215,6 +222,8 @@ export async function POST(req: NextRequest) {
                 });
               }
             }
+
+            messages.push(...pendingUserMessages);
             continue;
           }
 
