@@ -29,7 +29,17 @@ export function ChatWindow({
   const uniqueActive = [...new Set(activeTools)];
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "20px 16px" }}>
+    <div
+      style={{
+        flex: 1,
+        // Flex children default to min-height:auto, which would let tall
+        // content push this region past the parent and shove the input row
+        // off-screen. min-height:0 restores the intended scrollable area.
+        minHeight: 0,
+        overflowY: "auto",
+        padding: "20px 16px",
+      }}
+    >
       {isEmpty && (
         <div style={{ textAlign: "center", paddingTop: 40 }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>🌲</div>

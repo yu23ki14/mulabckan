@@ -143,7 +143,9 @@ export default function Page() {
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100vh",
+        // 100dvh stays inside the visible viewport on mobile (excludes the URL
+        // bar), so the input row doesn't get pushed below the fold.
+        height: "100dvh",
         background: "#f5f2ec",
         fontFamily:
           "'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif",
@@ -159,6 +161,7 @@ export default function Page() {
           alignItems: "center",
           gap: 12,
           boxShadow: "0 2px 12px rgba(0,0,0,0.15)",
+          flexShrink: 0,
         }}
       >
         <div style={{ fontSize: 22 }}>🌲</div>
@@ -210,10 +213,14 @@ export default function Page() {
       <div
         style={{
           padding: "12px 16px",
+          // Respect the iOS home-indicator area so the input isn't hidden
+          // behind the system gesture bar on phones in standalone mode.
+          paddingBottom: "calc(12px + env(safe-area-inset-bottom))",
           background: "#fff",
           borderTop: "1px solid rgba(74,103,65,0.15)",
           display: "flex",
           gap: 8,
+          flexShrink: 0,
         }}
       >
         <textarea
