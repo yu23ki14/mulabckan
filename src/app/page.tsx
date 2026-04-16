@@ -186,19 +186,6 @@ export default function Page() {
             ckan.nishiawakura-mulabo.jp
           </div>
         </div>
-        <div
-          style={{
-            marginLeft: "auto",
-            background: "rgba(232,240,230,0.15)",
-            border: "1px solid rgba(232,240,230,0.25)",
-            borderRadius: 20,
-            padding: "3px 10px",
-            fontSize: 10,
-            color: "rgba(232,240,230,0.7)",
-          }}
-        >
-          AI Agent
-        </div>
       </div>
 
       <ChatWindow
