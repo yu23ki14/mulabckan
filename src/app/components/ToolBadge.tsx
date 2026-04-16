@@ -4,6 +4,7 @@ const ICONS: Record<string, string> = {
   get_dataset: "📦",
   search_data: "🗃️",
   get_resource: "📄",
+  download_csv: "⬇️",
 };
 
 const LABELS: Record<string, string> = {
@@ -12,6 +13,7 @@ const LABELS: Record<string, string> = {
   get_dataset: "データセット詳細",
   search_data: "データ検索",
   get_resource: "リソース情報",
+  download_csv: "CSVダウンロード",
 };
 
 export function ToolBadge({ name }: { name: string }) {

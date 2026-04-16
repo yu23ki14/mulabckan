@@ -65,7 +65,80 @@ export const TOOLS = [
       required: ["id"],
     },
   },
+  {
+    name: "download_csv",
+    description:
+      "CSVリソースをダウンロードして行データとして返す。resource の datastore_active=false の場合はこれを使う（CKAN datastoreに登録されていないCSVの中身を読む手段）。Shift-JIS/UTF-8を自動判定し、ヘッダ行と指定件数の行を返す。",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource_id: { type: "string", description: "CSVリソースのID" },
+        max_rows: {
+          type: "integer",
+          description: "返す行数の上限 (default 50, max 200)",
+        },
+        offset: {
+          type: "integer",
+          description: "スキップする行数 (default 0)",
+        },
+      },
+      required: ["resource_id"],
+    },
+  },
 ] as const;
+
+// Minimal CSV parser. Handles quoted fields and escaped quotes ("").
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuote = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuote) {
+      if (c === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuote = false;
+        }
+      } else {
+        field += c;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inQuote = true;
+    } else if (c === ",") {
+      row.push(field);
+      field = "";
+    } else if (c === "\r") {
+      // ignore
+    } else if (c === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// Decode bytes as UTF-8, falling back to Shift-JIS for legacy Japanese CSVs.
+function decodeJapanese(buf: ArrayBuffer): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch {
+    return new TextDecoder("shift_jis").decode(buf);
+  }
+}
 
 async function ckanGet(path: string): Promise<unknown> {
   const r = await fetch(`${CKAN_BASE}/${path}`);
@@ -108,6 +181,50 @@ export async function executeTool(
         return await ckanGet(
           `resource_show?id=${encodeURIComponent(String(input.id ?? ""))}`
         );
+      case "download_csv": {
+        const rid = String(input.resource_id ?? "");
+        if (!rid) return { error: "resource_id is required" };
+        const resource = (await ckanGet(
+          `resource_show?id=${encodeURIComponent(rid)}`
+        )) as { url?: string; format?: string; name?: string };
+        if (!resource?.url) {
+          return { error: "resource has no downloadable url" };
+        }
+        const r = await fetch(resource.url, { redirect: "follow" });
+        if (!r.ok) {
+          return { error: `download failed: HTTP ${r.status}` };
+        }
+        const buf = await r.arrayBuffer();
+        const text = decodeJapanese(buf);
+        const all = parseCSV(text);
+        if (all.length === 0) {
+          return {
+            columns: [],
+            rows: [],
+            total_rows: 0,
+            returned_rows: 0,
+            offset: 0,
+            truncated: false,
+          };
+        }
+        const [header, ...dataRows] = all;
+        const maxRows = Math.min(
+          Math.max(Number(input.max_rows ?? 50), 1),
+          200
+        );
+        const offset = Math.max(Number(input.offset ?? 0), 0);
+        const slice = dataRows.slice(offset, offset + maxRows);
+        return {
+          resource_name: resource.name,
+          format: resource.format,
+          columns: header,
+          rows: slice,
+          total_rows: dataRows.length,
+          returned_rows: slice.length,
+          offset,
+          truncated: offset + slice.length < dataRows.length,
+        };
+      }
       default:
         return { error: `Unknown tool: ${name}` };
     }
