@@ -8,6 +8,7 @@ const ICONS: Record<string, string> = {
   read_pdf: "📕",
   read_text: "📝",
   view_image: "🖼️",
+  read_xlsx: "📊",
 };
 
 const LABELS: Record<string, string> = {
@@ -20,6 +21,7 @@ const LABELS: Record<string, string> = {
   read_pdf: "PDF読み取り",
   read_text: "テキスト読み取り",
   view_image: "画像を見る",
+  read_xlsx: "Excel読み取り",
 };
 
 export function ToolBadge({ name }: { name: string }) {

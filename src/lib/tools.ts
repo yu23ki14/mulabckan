@@ -129,6 +129,30 @@ export const TOOLS = [
       required: ["resource_id"],
     },
   },
+  {
+    name: "read_xlsx",
+    description:
+      "XLSX/XLS/ODS リソースをダウンロードしてシートの行データを返す。Excel ファイルで datastore_active=false のもの（例: population の『人口の推移.xlsx』）の中身を読むときに使う。",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource_id: { type: "string", description: "Excel 系リソースのID" },
+        sheet: {
+          type: "string",
+          description: "シート名。省略時は最初のシート",
+        },
+        max_rows: {
+          type: "integer",
+          description: "返す行数の上限 (default 50, max 200)",
+        },
+        offset: {
+          type: "integer",
+          description: "スキップする行数 (default 0)",
+        },
+      },
+      required: ["resource_id"],
+    },
+  },
 ] as const;
 
 // Sentinel on a tool result that means "the agentic loop should inject the
@@ -334,6 +358,65 @@ export async function executeTool(
           size: buf.byteLength,
         };
         return pending;
+      }
+      case "read_xlsx": {
+        const rid = String(input.resource_id ?? "");
+        if (!rid) return { error: "resource_id is required" };
+        const resource = (await ckanGet(
+          `resource_show?id=${encodeURIComponent(rid)}`
+        )) as { url?: string; format?: string; name?: string };
+        if (!resource?.url) {
+          return { error: "resource has no downloadable url" };
+        }
+        const r = await fetch(resource.url, { redirect: "follow" });
+        if (!r.ok) return { error: `download failed: HTTP ${r.status}` };
+        const buf = Buffer.from(await r.arrayBuffer());
+        const XLSX = await import("xlsx");
+        const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+        const requested = input.sheet ? String(input.sheet) : wb.SheetNames[0];
+        const sheet = wb.Sheets[requested];
+        if (!sheet) {
+          return {
+            error: `sheet not found: ${requested}`,
+            available_sheets: wb.SheetNames,
+          };
+        }
+        const all = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+          header: 1,
+          raw: false,
+          defval: "",
+        });
+        if (all.length === 0) {
+          return {
+            resource_name: resource.name,
+            sheets: wb.SheetNames,
+            sheet: requested,
+            columns: [],
+            rows: [],
+            total_rows: 0,
+            returned_rows: 0,
+            offset: 0,
+            truncated: false,
+          };
+        }
+        const [header, ...dataRows] = all;
+        const maxRows = Math.min(
+          Math.max(Number(input.max_rows ?? 50), 1),
+          200
+        );
+        const offset = Math.max(Number(input.offset ?? 0), 0);
+        const slice = dataRows.slice(offset, offset + maxRows);
+        return {
+          resource_name: resource.name,
+          sheets: wb.SheetNames,
+          sheet: requested,
+          columns: header,
+          rows: slice,
+          total_rows: dataRows.length,
+          returned_rows: slice.length,
+          offset,
+          truncated: offset + slice.length < dataRows.length,
+        };
       }
       case "download_csv": {
         const rid = String(input.resource_id ?? "");
