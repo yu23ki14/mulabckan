@@ -338,6 +338,11 @@ export async function executeTool(
         // a ToUnicode map), render pages to images instead and hand them
         // to the vision model.
         if (pdfTextLooksGarbled(fullText)) {
+          console.log(
+            `[tool:read_pdf] garbled text detected, rendering to images ${JSON.stringify(
+              { resource: resource.name, text_len: fullText.length }
+            )}`
+          );
           const maxPages = Math.min(
             Math.max(Number(input.max_pages ?? 5), 1),
             10
@@ -551,6 +556,14 @@ export async function executeTool(
         return { error: `Unknown tool: ${name}` };
     }
   } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    const msg = e instanceof Error ? e.message : String(e);
+    // Surface the full error (incl. stack) to the serverless function log so
+    // failures aren't opaque — the returned {error} message is what the model
+    // sees, but the caller still needs to know *why* it happened.
+    console.error(
+      `[tool:${name}] ERROR ${JSON.stringify({ input, error: msg })}`
+    );
+    if (e instanceof Error && e.stack) console.error(e.stack);
+    return { error: msg };
   }
 }

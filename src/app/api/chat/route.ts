@@ -67,6 +67,28 @@ export async function POST(req: NextRequest) {
   const openai = new OpenAI({ apiKey });
   const { history, userText } = (await req.json()) as ChatRequest;
 
+  const reqId = Math.random().toString(36).slice(2, 10);
+  const t0 = Date.now();
+  const log = (event: string, data?: Record<string, unknown>) => {
+    console.log(
+      `[chat:${reqId}] ${event}${data ? " " + JSON.stringify(data) : ""}`
+    );
+  };
+  const logErr = (event: string, err: unknown, extra?: Record<string, unknown>) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    console.error(
+      `[chat:${reqId}] ${event} ${JSON.stringify({ error: msg, ...extra })}`
+    );
+    if (stack) console.error(stack);
+  };
+
+  log("request", {
+    model: MODEL,
+    historyLen: history?.length ?? 0,
+    userTextPreview: userText.slice(0, 80),
+  });
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -84,16 +106,34 @@ export async function POST(req: NextRequest) {
         const toolCalls: string[] = [];
 
         for (let turn = 0; turn < MAX_TURNS; turn++) {
-          const completion = await openai.chat.completions.create({
-            model: MODEL,
-            messages: [{ role: "system", content: SYSTEM }, ...messages],
-            tools: OPENAI_TOOLS,
-            tool_choice: "auto",
-          });
+          log("turn_start", { turn, messages: messages.length });
+          let completion;
+          try {
+            completion = await openai.chat.completions.create({
+              model: MODEL,
+              messages: [{ role: "system", content: SYSTEM }, ...messages],
+              tools: OPENAI_TOOLS,
+              tool_choice: "auto",
+            });
+          } catch (e) {
+            logErr("openai_error", e, { turn });
+            throw e;
+          }
 
           const choice = completion.choices[0];
           const assistantMsg = choice.message;
           messages.push(assistantMsg);
+
+          log("openai_response", {
+            turn,
+            finish_reason: choice.finish_reason,
+            tool_calls:
+              assistantMsg.tool_calls
+                ?.filter((t) => t.type === "function")
+                .map((t) => t.function.name) ?? [],
+            text_len: (assistantMsg.content ?? "").length,
+            usage: completion.usage,
+          });
 
           if (
             choice.finish_reason === "tool_calls" &&
@@ -107,16 +147,34 @@ export async function POST(req: NextRequest) {
                 input = tc.function.arguments
                   ? JSON.parse(tc.function.arguments)
                   : {};
-              } catch {
+              } catch (e) {
+                logErr("tool_args_parse", e, {
+                  name,
+                  raw: tc.function.arguments,
+                });
                 input = {};
               }
               toolCalls.push(name);
               send("tool_call", { name });
-              const result = await executeTool(name, input);
+              log("tool_call", { name, input });
+
+              const toolStart = Date.now();
+              let result: unknown;
+              try {
+                result = await executeTool(name, input);
+              } catch (e) {
+                logErr("tool_exception", e, { name });
+                result = { error: e instanceof Error ? e.message : String(e) };
+              }
+              const toolMs = Date.now() - toolStart;
 
               if (isPendingImages(result)) {
-                // tool_result stays small (no base64); the images ride in
-                // the synthetic user message that follows.
+                log("tool_result", {
+                  name,
+                  ms: toolMs,
+                  attached_images: result.images.length,
+                  meta: result.meta,
+                });
                 messages.push({
                   role: "tool",
                   tool_call_id: tc.id,
@@ -139,6 +197,17 @@ export async function POST(req: NextRequest) {
                   ],
                 });
               } else {
+                const r = result as Record<string, unknown>;
+                if (r && typeof r === "object" && "error" in r) {
+                  log("tool_error", { name, ms: toolMs, error: r.error });
+                } else {
+                  const serialized = JSON.stringify(result);
+                  log("tool_result", {
+                    name,
+                    ms: toolMs,
+                    bytes: serialized.length,
+                  });
+                }
                 messages.push({
                   role: "tool",
                   tool_call_id: tc.id,
@@ -149,6 +218,11 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
+          log("done", {
+            totalMs: Date.now() - t0,
+            toolCalls,
+            turns: turn + 1,
+          });
           send("done", {
             text: assistantMsg.content ?? "",
             toolCalls,
@@ -158,6 +232,7 @@ export async function POST(req: NextRequest) {
           return;
         }
 
+        log("max_turns_reached", { toolCalls });
         send("done", {
           text: "ツール呼び出しの上限に達しました。",
           toolCalls,
@@ -165,6 +240,7 @@ export async function POST(req: NextRequest) {
         });
         controller.close();
       } catch (e) {
+        logErr("fatal", e);
         send("error", {
           message: e instanceof Error ? e.message : String(e),
         });
