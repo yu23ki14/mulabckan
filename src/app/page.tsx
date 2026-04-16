@@ -4,14 +4,17 @@ import { useEffect, useRef, useState } from "react";
 import { ChatWindow } from "./components/ChatWindow";
 import type { DisplayMessage } from "./components/MessageBubble";
 
-type ContentBlock =
-  | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+type ToolCall = {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+};
 
 type ApiMessage = {
-  role: "user" | "assistant";
-  content: string | ContentBlock[];
+  role: "user" | "assistant" | "tool";
+  content?: string | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
 };
 
 type DoneEvent = {
