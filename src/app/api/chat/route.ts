@@ -4,7 +4,12 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
-import { TOOLS, executeTool } from "@/lib/tools";
+import {
+  TOOLS,
+  executeTool,
+  isPendingImage,
+  PENDING_IMAGE_MARKER,
+} from "@/lib/tools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,19 +20,22 @@ const MAX_TURNS = 6;
 const SYSTEM = `あなたは西粟倉村（岡山県）のオープンデータポータル（CKAN）のアシスタントです。
 ユーザーの質問に答えるために、必要に応じてCKANのツールを呼び出してデータを調べてください。
 
-データ取得の方針:
-- まず何があるか分からない場合は list_datasets で一覧を確認する
-- 気になるデータセットは get_dataset で resources[] を確認する
-- CSV の中身を読むとき:
-  - resource の datastore_active=true → search_data （datastore経由）
-  - resource の datastore_active=false → download_csv （ファイルを直接ダウンロードして解析）
-  - PDF/XLS/ZIP などバイナリ形式はダウンロードできないので、その旨を伝える
+データ取得の方針（resource の format に応じて使い分け）:
+- まず何があるか分からない場合は list_datasets で一覧を確認
+- 気になるデータセットは get_dataset で resources[] とその format / datastore_active を確認
+- CSV:
+  - datastore_active=true → search_data で datastore 経由取得
+  - datastore_active=false → download_csv でファイル直接ダウンロード
+- PDF → read_pdf でテキスト抽出（スキャン画像のみのPDFは抽出不可）
+- MD / TXT / JSON などテキスト系 → read_text
+- JPEG / PNG / WEBP など画像 → view_image（画像を直接「見て」分析する）
+- XLS / XLSX / ZIP はデフォルトでは読めないので、その旨を伝える
 
 回答の方針:
 - 日本語で丁寧かつ簡潔に回答する
 - 表形式のデータは Markdown テーブルで整理して見やすく表示する
 - データに基づいた分析・洞察も積極的に提供する
-- 該当データが存在しない場合は無理に作らず、代わりに近いデータを提案する`;
+- 該当データが存在しない場合は無理に作らず、近いデータを提案する`;
 
 interface ChatRequest {
   history: ChatCompletionMessageParam[];
@@ -102,11 +110,46 @@ export async function POST(req: NextRequest) {
               toolCalls.push(name);
               send("tool_call", { name });
               const result = await executeTool(name, input);
-              messages.push({
-                role: "tool",
-                tool_call_id: tc.id,
-                content: JSON.stringify(result),
-              });
+
+              if (isPendingImage(result)) {
+                // Keep the tool_result lightweight (don't embed the base64
+                // in the tool message — that would duplicate it in history).
+                const { data_url, ...meta } = result;
+                const metaWithoutMarker: Record<string, unknown> = {
+                  ...meta,
+                };
+                delete metaWithoutMarker[PENDING_IMAGE_MARKER];
+                messages.push({
+                  role: "tool",
+                  tool_call_id: tc.id,
+                  content: JSON.stringify({
+                    ...metaWithoutMarker,
+                    note: "image attached in the next user message",
+                  }),
+                });
+                // Inject the image as the next user turn. gpt-4o-mini (and
+                // any other vision-capable model) will see it on the next
+                // assistant invocation.
+                messages.push({
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: `[${result.resource_name ?? "image"}] を添付しました。画像の内容を確認して回答に活用してください。`,
+                    },
+                    {
+                      type: "image_url",
+                      image_url: { url: data_url },
+                    },
+                  ],
+                });
+              } else {
+                messages.push({
+                  role: "tool",
+                  tool_call_id: tc.id,
+                  content: JSON.stringify(result),
+                });
+              }
             }
             continue;
           }

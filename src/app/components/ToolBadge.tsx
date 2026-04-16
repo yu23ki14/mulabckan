@@ -5,6 +5,9 @@ const ICONS: Record<string, string> = {
   search_data: "🗃️",
   get_resource: "📄",
   download_csv: "⬇️",
+  read_pdf: "📕",
+  read_text: "📝",
+  view_image: "🖼️",
 };
 
 const LABELS: Record<string, string> = {
@@ -14,6 +17,9 @@ const LABELS: Record<string, string> = {
   search_data: "データ検索",
   get_resource: "リソース情報",
   download_csv: "CSVダウンロード",
+  read_pdf: "PDF読み取り",
+  read_text: "テキスト読み取り",
+  view_image: "画像を見る",
 };
 
 export function ToolBadge({ name }: { name: string }) {

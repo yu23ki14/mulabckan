@@ -85,7 +85,69 @@ export const TOOLS = [
       required: ["resource_id"],
     },
   },
+  {
+    name: "read_pdf",
+    description:
+      "PDFリソースをダウンロードしてテキストを抽出する。全ページの本文を結合して返す。PDF内に画像やスキャン情報しかない場合は抽出テキストが空になる可能性がある。",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource_id: { type: "string", description: "PDFリソースのID" },
+        max_chars: {
+          type: "integer",
+          description: "返すテキストの最大文字数 (default 8000, max 20000)",
+        },
+      },
+      required: ["resource_id"],
+    },
+  },
+  {
+    name: "read_text",
+    description:
+      "テキスト系リソース（Markdown / JSON / TXT など）をダウンロードして中身を返す。Shift-JIS/UTF-8自動判定。",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource_id: { type: "string", description: "テキスト系リソースのID" },
+        max_chars: {
+          type: "integer",
+          description: "返すテキストの最大文字数 (default 8000, max 20000)",
+        },
+      },
+      required: ["resource_id"],
+    },
+  },
+  {
+    name: "view_image",
+    description:
+      "画像リソース（JPEG/PNG 等）を取得して LLM に視覚入力として渡す。ツール呼び出し後、次のメッセージに画像が添付されるので、それを見て説明・分析する。",
+    input_schema: {
+      type: "object",
+      properties: {
+        resource_id: { type: "string", description: "画像リソースのID" },
+      },
+      required: ["resource_id"],
+    },
+  },
 ] as const;
+
+// Sentinel on a tool result that means "the agentic loop should inject the
+// image as a follow-up user message with image_url content."
+export const PENDING_IMAGE_MARKER = "__pending_image__" as const;
+export type PendingImage = {
+  [PENDING_IMAGE_MARKER]: true;
+  data_url: string;
+  resource_name?: string;
+  mimetype: string;
+  size: number;
+};
+export function isPendingImage(v: unknown): v is PendingImage {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as Record<string, unknown>)[PENDING_IMAGE_MARKER] === true
+  );
+}
 
 // Minimal CSV parser. Handles quoted fields and escaped quotes ("").
 function parseCSV(text: string): string[][] {
@@ -181,6 +243,98 @@ export async function executeTool(
         return await ckanGet(
           `resource_show?id=${encodeURIComponent(String(input.id ?? ""))}`
         );
+      case "read_pdf": {
+        const rid = String(input.resource_id ?? "");
+        if (!rid) return { error: "resource_id is required" };
+        const resource = (await ckanGet(
+          `resource_show?id=${encodeURIComponent(rid)}`
+        )) as { url?: string; format?: string; name?: string };
+        if (!resource?.url) {
+          return { error: "resource has no downloadable url" };
+        }
+        const r = await fetch(resource.url, { redirect: "follow" });
+        if (!r.ok) return { error: `download failed: HTTP ${r.status}` };
+        const buf = Buffer.from(await r.arrayBuffer());
+        const { PDFParse } = await import("pdf-parse");
+        const parser = new PDFParse({ data: buf });
+        const result = await parser.getText();
+        const fullText = (result.text ?? "").trim();
+        const maxChars = Math.min(
+          Math.max(Number(input.max_chars ?? 8000), 100),
+          20000
+        );
+        const truncated = fullText.length > maxChars;
+        return {
+          resource_name: resource.name,
+          total_pages: result.total,
+          total_chars: fullText.length,
+          text: truncated ? fullText.slice(0, maxChars) : fullText,
+          truncated,
+        };
+      }
+      case "read_text": {
+        const rid = String(input.resource_id ?? "");
+        if (!rid) return { error: "resource_id is required" };
+        const resource = (await ckanGet(
+          `resource_show?id=${encodeURIComponent(rid)}`
+        )) as { url?: string; format?: string; name?: string };
+        if (!resource?.url) {
+          return { error: "resource has no downloadable url" };
+        }
+        const r = await fetch(resource.url, { redirect: "follow" });
+        if (!r.ok) return { error: `download failed: HTTP ${r.status}` };
+        const buf = await r.arrayBuffer();
+        const text = decodeJapanese(buf);
+        const maxChars = Math.min(
+          Math.max(Number(input.max_chars ?? 8000), 100),
+          20000
+        );
+        const truncated = text.length > maxChars;
+        return {
+          resource_name: resource.name,
+          format: resource.format,
+          total_chars: text.length,
+          text: truncated ? text.slice(0, maxChars) : text,
+          truncated,
+        };
+      }
+      case "view_image": {
+        const rid = String(input.resource_id ?? "");
+        if (!rid) return { error: "resource_id is required" };
+        const resource = (await ckanGet(
+          `resource_show?id=${encodeURIComponent(rid)}`
+        )) as {
+          url?: string;
+          format?: string;
+          name?: string;
+          mimetype?: string;
+        };
+        if (!resource?.url) {
+          return { error: "resource has no downloadable url" };
+        }
+        const r = await fetch(resource.url, { redirect: "follow" });
+        if (!r.ok) return { error: `download failed: HTTP ${r.status}` };
+        const buf = await r.arrayBuffer();
+        // Cap payload at 10MB. OpenAI's image limit is 20MB, but keeping
+        // multi-turn history small matters more than squeezing in huge files.
+        if (buf.byteLength > 10 * 1024 * 1024) {
+          return {
+            error: `image too large (${buf.byteLength} bytes, max 10MB)`,
+          };
+        }
+        const b64 = Buffer.from(buf).toString("base64");
+        const mime =
+          resource.mimetype ||
+          `image/${(resource.format ?? "jpeg").toLowerCase()}`;
+        const pending: PendingImage = {
+          [PENDING_IMAGE_MARKER]: true,
+          data_url: `data:${mime};base64,${b64}`,
+          resource_name: resource.name,
+          mimetype: mime,
+          size: buf.byteLength,
+        };
+        return pending;
+      }
       case "download_csv": {
         const rid = String(input.resource_id ?? "");
         if (!rid) return { error: "resource_id is required" };
