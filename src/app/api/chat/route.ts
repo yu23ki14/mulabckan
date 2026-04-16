@@ -7,8 +7,7 @@ import type {
 import {
   TOOLS,
   executeTool,
-  isPendingImage,
-  PENDING_IMAGE_MARKER,
+  isPendingImages,
 } from "@/lib/tools";
 
 export const runtime = "nodejs";
@@ -115,36 +114,28 @@ export async function POST(req: NextRequest) {
               send("tool_call", { name });
               const result = await executeTool(name, input);
 
-              if (isPendingImage(result)) {
-                // Keep the tool_result lightweight (don't embed the base64
-                // in the tool message — that would duplicate it in history).
-                const { data_url, ...meta } = result;
-                const metaWithoutMarker: Record<string, unknown> = {
-                  ...meta,
-                };
-                delete metaWithoutMarker[PENDING_IMAGE_MARKER];
+              if (isPendingImages(result)) {
+                // tool_result stays small (no base64); the images ride in
+                // the synthetic user message that follows.
                 messages.push({
                   role: "tool",
                   tool_call_id: tc.id,
                   content: JSON.stringify({
-                    ...metaWithoutMarker,
-                    note: "image attached in the next user message",
+                    ...result.meta,
+                    attached_images: result.images.length,
                   }),
                 });
-                // Inject the image as the next user turn. gpt-4o-mini (and
-                // any other vision-capable model) will see it on the next
-                // assistant invocation.
                 messages.push({
                   role: "user",
                   content: [
                     {
                       type: "text",
-                      text: `[${result.resource_name ?? "image"}] を添付しました。画像の内容を確認して回答に活用してください。`,
+                      text: `添付画像 ${result.images.length} 件を確認して回答に活用してください。`,
                     },
-                    {
-                      type: "image_url",
-                      image_url: { url: data_url },
-                    },
+                    ...result.images.map((img) => ({
+                      type: "image_url" as const,
+                      image_url: { url: img.data_url },
+                    })),
                   ],
                 });
               } else {

@@ -155,22 +155,47 @@ export const TOOLS = [
   },
 ] as const;
 
-// Sentinel on a tool result that means "the agentic loop should inject the
-// image as a follow-up user message with image_url content."
-export const PENDING_IMAGE_MARKER = "__pending_image__" as const;
-export type PendingImage = {
-  [PENDING_IMAGE_MARKER]: true;
-  data_url: string;
-  resource_name?: string;
-  mimetype: string;
-  size: number;
+// Sentinel on a tool result that means "the agentic loop should inject one
+// or more images as a follow-up user message with image_url content."
+// Used by view_image (single) and read_pdf's image fallback (multi-page).
+export const PENDING_IMAGES_MARKER = "__pending_images__" as const;
+export type PendingImages = {
+  [PENDING_IMAGES_MARKER]: true;
+  images: Array<{ data_url: string; label?: string }>;
+  meta: Record<string, unknown>;
 };
-export function isPendingImage(v: unknown): v is PendingImage {
+export function isPendingImages(v: unknown): v is PendingImages {
   return (
     typeof v === "object" &&
     v !== null &&
-    (v as Record<string, unknown>)[PENDING_IMAGE_MARKER] === true
+    (v as Record<string, unknown>)[PENDING_IMAGES_MARKER] === true
   );
+}
+
+// Detect garbled text from PDFs that embed CID fonts without a ToUnicode
+// map. These come back as sequences of glyph codes (NULs, control chars).
+function pdfTextLooksGarbled(text: string): boolean {
+  if (text.length < 20) return true;
+  const nulCount = (text.match(/\u0000/g) ?? []).length;
+  if (nulCount / text.length > 0.03) return true;
+  // Count code points outside basic printable / CJK / kana / Latin ranges.
+  let printable = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if (
+      c === 0x20 || // space
+      c === 0x0a ||
+      c === 0x0d ||
+      c === 0x09 ||
+      (c >= 0x21 && c <= 0x7e) || // ASCII printable
+      (c >= 0x3000 && c <= 0x30ff) || // CJK symbols / Hiragana / Katakana
+      (c >= 0x4e00 && c <= 0x9fff) || // CJK Unified Ideographs
+      (c >= 0xff00 && c <= 0xffef) // Fullwidth forms
+    ) {
+      printable++;
+    }
+  }
+  return printable / text.length < 0.6;
 }
 
 // Minimal CSV parser. Handles quoted fields and escaped quotes ("").
@@ -308,6 +333,39 @@ export async function executeTool(
         const parser = new PDFParse({ data: buf });
         const result = await parser.getText();
         const fullText = (result.text ?? "").trim();
+
+        // If text extraction produced garbage (embedded CID fonts without
+        // a ToUnicode map), render pages to images instead and hand them
+        // to the vision model.
+        if (pdfTextLooksGarbled(fullText)) {
+          const maxPages = Math.min(
+            Math.max(Number(input.max_pages ?? 5), 1),
+            10
+          );
+          const shots = (await parser.getScreenshot()) as {
+            pages: Array<{
+              dataUrl: string;
+              pageNumber: number;
+              data?: { byteLength: number };
+            }>;
+            total: number;
+          };
+          const pages = shots.pages.slice(0, maxPages);
+          return {
+            [PENDING_IMAGES_MARKER]: true,
+            images: pages.map((p) => ({
+              data_url: p.dataUrl,
+              label: `page ${p.pageNumber}`,
+            })),
+            meta: {
+              resource_name: resource.name,
+              total_pages: shots.total,
+              rendered_pages: pages.length,
+              note: "テキスト抽出が失敗したためページ画像を添付。画像から読み取って回答してください。",
+            },
+          } satisfies PendingImages;
+        }
+
         const maxChars = Math.min(
           Math.max(Number(input.max_chars ?? 8000), 100),
           20000
@@ -375,14 +433,16 @@ export async function executeTool(
         const mime =
           resource.mimetype ||
           `image/${(resource.format ?? "jpeg").toLowerCase()}`;
-        const pending: PendingImage = {
-          [PENDING_IMAGE_MARKER]: true,
-          data_url: `data:${mime};base64,${b64}`,
-          resource_name: resource.name,
-          mimetype: mime,
-          size: buf.byteLength,
-        };
-        return pending;
+        const data_url = `data:${mime};base64,${b64}`;
+        return {
+          [PENDING_IMAGES_MARKER]: true,
+          images: [{ data_url, label: resource.name }],
+          meta: {
+            resource_name: resource.name,
+            mimetype: mime,
+            size: buf.byteLength,
+          },
+        } satisfies PendingImages;
       }
       case "read_xlsx": {
         const rid = String(input.resource_id ?? "");
