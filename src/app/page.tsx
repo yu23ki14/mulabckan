@@ -1,65 +1,273 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useRef, useState } from "react";
+import { ChatWindow } from "./components/ChatWindow";
+import type { DisplayMessage } from "./components/MessageBubble";
+
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: string };
+
+type ApiMessage = {
+  role: "user" | "assistant";
+  content: string | ContentBlock[];
+};
+
+type DoneEvent = {
+  text: string;
+  toolCalls: string[];
+  history: ApiMessage[];
+};
+
+export default function Page() {
+  const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [apiHistory, setApiHistory] = useState<ApiMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [activeTools, setActiveTools] = useState<string[]>([]);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, activeTools, loading]);
+
+  const send = async (override?: string) => {
+    const userText = (override ?? input).trim();
+    if (!userText || loading) return;
+    setInput("");
+    setLoading(true);
+    setActiveTools([]);
+    setMessages((prev) => [...prev, { role: "user", text: userText }]);
+
+    const calledTools: string[] = [];
+    let done: DoneEvent | null = null;
+    let errorMsg: string | null = null;
+
+    try {
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ history: apiHistory, userText }),
+      });
+      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamDone = false;
+
+      while (!streamDone) {
+        const { value, done: d } = await reader.read();
+        streamDone = d;
+        if (value) buffer += decoder.decode(value, { stream: true });
+
+        let idx;
+        while ((idx = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          let event = "message";
+          let dataStr = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("event: ")) event = line.slice(7);
+            else if (line.startsWith("data: ")) dataStr += line.slice(6);
+          }
+          if (!dataStr) continue;
+
+          const parsed = JSON.parse(dataStr);
+          if (event === "tool_call") {
+            calledTools.push(parsed.name);
+            setActiveTools((prev) => [...prev, parsed.name]);
+          } else if (event === "done") {
+            done = parsed as DoneEvent;
+          } else if (event === "error") {
+            errorMsg = parsed.message;
+          }
+        }
+      }
+
+      if (errorMsg) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            text: `⚠️ エラーが発生しました: ${errorMsg}`,
+            toolCalls: [],
+          },
+        ]);
+      } else if (done) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            text: done!.text,
+            toolCalls: calledTools,
+          },
+        ]);
+        setApiHistory(done.history);
+      }
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: `⚠️ エラーが発生しました: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          toolCalls: [],
+        },
+      ]);
+    } finally {
+      setLoading(false);
+      setActiveTools([]);
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
+  };
+
+  const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void send();
+    }
+  };
+
+  const disabled = loading || !input.trim();
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        background: "#f5f2ec",
+        fontFamily:
+          "'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif",
+        color: "#2a2a1e",
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          background: "#2d4a29",
+          padding: "14px 20px",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          boxShadow: "0 2px 12px rgba(0,0,0,0.15)",
+        }}
+      >
+        <div style={{ fontSize: 22 }}>🌲</div>
+        <div>
+          <div
+            style={{
+              color: "#e8f0e6",
+              fontSize: 14,
+              fontWeight: 700,
+              letterSpacing: 0.5,
+            }}
+          >
+            西粟倉村 オープンデータ
+          </div>
+          <div
+            style={{
+              color: "rgba(232,240,230,0.6)",
+              fontSize: 10,
+              marginTop: 1,
+            }}
+          >
+            ckan.nishiawakura-mulabo.jp
+          </div>
+        </div>
+        <div
+          style={{
+            marginLeft: "auto",
+            background: "rgba(232,240,230,0.15)",
+            border: "1px solid rgba(232,240,230,0.25)",
+            borderRadius: 20,
+            padding: "3px 10px",
+            fontSize: 10,
+            color: "rgba(232,240,230,0.7)",
+          }}
+        >
+          AI Agent
+        </div>
+      </div>
+
+      <ChatWindow
+        messages={messages}
+        loading={loading}
+        activeTools={activeTools}
+        onSuggestionClick={(s) => void send(s)}
+        bottomRef={bottomRef}
+      />
+
+      {/* Input */}
+      <div
+        style={{
+          padding: "12px 16px",
+          background: "#fff",
+          borderTop: "1px solid rgba(74,103,65,0.15)",
+          display: "flex",
+          gap: 8,
+        }}
+      >
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKey}
+          placeholder="データについて質問してください…"
+          rows={1}
+          style={{
+            flex: 1,
+            border: "1px solid rgba(74,103,65,0.3)",
+            borderRadius: 12,
+            padding: "9px 12px",
+            fontSize: 13,
+            resize: "none",
+            outline: "none",
+            fontFamily: "inherit",
+            background: "#f9f8f5",
+            color: "#2a2a1e",
+            lineHeight: 1.5,
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = "#4a6741";
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = "rgba(74,103,65,0.3)";
+          }}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+        <button
+          onClick={() => void send()}
+          disabled={disabled}
+          style={{
+            background: disabled ? "rgba(74,103,65,0.3)" : "#2d4a29",
+            border: "none",
+            borderRadius: 12,
+            padding: "0 16px",
+            cursor: disabled ? "not-allowed" : "pointer",
+            color: "#e8f0e6",
+            fontSize: 16,
+            transition: "background 0.15s",
+            flexShrink: 0,
+          }}
+        >
+          ↑
+        </button>
+      </div>
+
+      <style>{`
+        @keyframes bounce {
+          0%, 60%, 100% { transform: translateY(0); }
+          30% { transform: translateY(-4px); }
+        }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(74,103,65,0.3); border-radius: 2px; }
+      `}</style>
     </div>
   );
 }
