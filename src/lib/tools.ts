@@ -11,7 +11,7 @@ export const TOOLS = [
   {
     name: "list_datasets",
     description:
-      "西粟倉村CKANポータルに登録されているデータセットの一覧を取得する。何があるか調べるときに使う。",
+      "西粟倉村CKANポータルに登録されているデータセットの一覧を取得する。各データセットの name（URL slug）と title（日本語タイトル）、概要を返す。name は英数字スラッグなので意味の推測に使ってはいけない。必ず title を使って説明すること。",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -243,8 +243,33 @@ export async function executeTool(
 ): Promise<unknown> {
   try {
     switch (name) {
-      case "list_datasets":
-        return await ckanGet("package_list");
+      case "list_datasets": {
+        // Use package_search to get titles, not just slug names. Without this
+        // the model ends up guessing Japanese meanings from the romaji slug
+        // (e.g. "uryou" → "漁業") and hallucinates.
+        const r = (await ckanGet("package_search?rows=1000")) as {
+          count: number;
+          results: Array<{
+            name: string;
+            title: string;
+            notes?: string;
+            num_resources?: number;
+          }>;
+        };
+        return {
+          count: r.count,
+          datasets: r.results.map((p) => ({
+            name: p.name,
+            title: p.title,
+            notes: p.notes
+              ? p.notes.length > 200
+                ? p.notes.slice(0, 200) + "…"
+                : p.notes
+              : undefined,
+            num_resources: p.num_resources,
+          })),
+        };
+      }
       case "search_datasets": {
         const q = encodeURIComponent(String(input.query ?? ""));
         const rows = Number(input.rows ?? 8);
